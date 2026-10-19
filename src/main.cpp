@@ -198,6 +198,63 @@ void handleTareRequest()
 }
 
 
+// Stage 6B: calibration and information HTTP API.
+// Calibration is intentionally synchronous: WebServer handles one request at a time.
+void handleInfoRequest() {
+  String json = "{\"firmware\":\"stage-6b\",\"calibration\":";
+  json += String(calibrationFactor, 4);
+  json += ",\"unit\":\"counts/g\",\"min_known_grams\":0.01,\"max_known_grams\":5000}";
+  server.send(200, "application/json", json);
+}
+
+void handleCalibrationRequest() {
+  // Strict numeric validation: reject empty, malformed, and non-finite inputs.
+  if (!server.hasArg("grams")) {
+    server.send(400, "application/json", "{\"success\":false,\"error\":\"Missing grams parameter\"}");
+    return;
+  }
+  const String arg = server.arg("grams");
+  if (arg.isEmpty() || arg.length() > 16) {
+    server.send(400, "application/json", "{\"success\":false,\"error\":\"Invalid grams parameter\"}");
+    return;
+  }
+  char *end = nullptr;
+  const float knownGrams = strtof(arg.c_str(), &end);
+  if (end == arg.c_str() || *end != '\0' || !isfinite(knownGrams) ||
+      knownGrams <= 0.0f || knownGrams > 5000.0f) {
+    server.send(400, "application/json", "{\"success\":false,\"error\":\"Known mass must be greater than 0 and at most 5000 g\"}");
+    return;
+  }
+  weightValid = false;
+  if (!scale.wait_ready_timeout(1500)) {
+    server.send(503, "application/json", "{\"success\":false,\"error\":\"HX711 not ready\"}");
+    return;
+  }
+  const float netCounts = (float)scale.get_value(20);
+  if (!isfinite(netCounts) || fabsf(netCounts) < 100.0f) {
+    server.send(422, "application/json", "{\"success\":false,\"error\":\"Signal too small; tare unloaded then place known mass\"}");
+    return;
+  }
+  const float candidate = netCounts / knownGrams;
+  if (!isfinite(candidate) || fabsf(candidate) < 0.01f || fabsf(candidate) >= 1000000.0f) {
+    server.send(422, "application/json", "{\"success\":false,\"error\":\"Invalid calibration factor\"}");
+    return;
+  }
+  // Save first, so a storage failure does not silently change calibration.
+  const size_t saved = prefs.putFloat("factor", candidate);
+  if (saved != sizeof(float)) {
+    server.send(500, "application/json", "{\"success\":false,\"error\":\"Failed to save calibration\"}");
+    return;
+  }
+  calibrationFactor = candidate;
+  scale.set_scale(calibrationFactor);
+  Serial.printf("[HTTP] Calibration saved: %.4f counts/g using %.2f g\\n", calibrationFactor, knownGrams);
+  String json = "{\"success\":true,\"calibration\":";
+  json += String(calibrationFactor, 4);
+  json += ",\"unit\":\"counts/g\"}";
+  server.send(200, "application/json", json);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1200);
@@ -234,6 +291,8 @@ void setup() {
 
   server.on("/api/weight", HTTP_GET, handleWeightRequest);
   server.on("/api/tare", HTTP_POST, handleTareRequest);
+  server.on("/api/info", HTTP_GET, handleInfoRequest);
+  server.on("/api/calibrate", HTTP_POST, handleCalibrationRequest);
   server.begin();
 
   Serial.println("[HTTP] Weight API started on port 80");
