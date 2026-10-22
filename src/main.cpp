@@ -5,10 +5,14 @@
 #include <WiFi.h>
 #include <math.h>
 #include <WebServer.h>
+#include <Wire.h>
+#include <U8g2lib.h> // OLED Stage 3
 
 // -------------------- HX711 --------------------
 constexpr uint8_t HX711_DOUT = 16;
 constexpr uint8_t HX711_SCK = 17;
+constexpr uint8_t OLED_SDA = 21;
+constexpr uint8_t OLED_SCL = 22;
 constexpr float DEFAULT_CALIBRATION = 422.6200f;
 constexpr uint32_t REPORT_INTERVAL_MS = 250;
 
@@ -28,6 +32,30 @@ uint32_t lastReportMs = 0;
 float latestWeight = 0.0f;
 uint32_t lastWeightMs = 0;
 bool weightValid = false;
+U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
+uint32_t lastOledMs = 0;
+
+void updateOled() {
+  if (millis() - lastOledMs < 300) return;
+  lastOledMs = millis();
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(0, 10, "FILAMENT SCALE");
+  oled.drawHLine(0, 14, 128);
+  char value[24];
+  if (weightValid && millis() - lastWeightMs <= 3000) {
+    snprintf(value, sizeof(value), "%.0f g", (double)latestWeight);
+  } else {
+    snprintf(value, sizeof(value), "--.- g");
+  }
+  oled.setFont(u8g2_font_logisoso24_tf);
+  oled.drawStr(0, 46, value);
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(0, 62, (weightValid && millis() - lastWeightMs <= 3000) ? "LIVE" : "NO READING");
+  oled.drawStr(78, 62, WiFi.status() == WL_CONNECTED ? "WiFi OK" : "WiFi --");
+  oled.sendBuffer();
+}
+
 uint32_t lastWifiAttemptMs = 0;
 
 bool ready(uint32_t timeoutMs = 1500) {
@@ -256,6 +284,9 @@ void handleCalibrationRequest() {
 }
 
 void setup() {
+  Wire.begin(OLED_SDA, OLED_SCL);
+  oled.setI2CAddress(0x3C * 2); // U8g2 expects the 8-bit I2C address
+  oled.begin();
   Serial.begin(115200);
   delay(1200);
 
@@ -320,6 +351,7 @@ void loop() {
   maintainWiFi();
 
   server.handleClient();
+  updateOled();
 
 
 if (millis() - lastReportMs >= REPORT_INTERVAL_MS) {
